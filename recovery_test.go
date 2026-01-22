@@ -10,6 +10,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // TestGoNoPanic verifies normal execution without panic
@@ -22,9 +25,9 @@ func TestGoNoPanic(t *testing.T) {
 	Go(func() {
 		defer wg.Done()
 		executed = true
-	}, func(err any, stack []byte) {
+	}, WithHandler(func(err any, stack []byte) {
 		handlerCalled = true
-	})
+	}))
 
 	wg.Wait()
 
@@ -46,11 +49,11 @@ func TestGoPanicWithHandler(t *testing.T) {
 
 	Go(func() {
 		panic(expectedPanic)
-	}, func(err any, stack []byte) {
+	}, WithHandler(func(err any, stack []byte) {
 		defer wg.Done()
 		capturedErr = err
 		capturedStack = stack
-	})
+	}))
 
 	wg.Wait()
 
@@ -65,21 +68,23 @@ func TestGoPanicWithHandler(t *testing.T) {
 	}
 }
 
-// TestGoPanicWithNilHandler verifies panic is caught even with nil handler
-func TestGoPanicWithNilHandler(t *testing.T) {
-	done := make(chan bool, 1)
-
-	// Capture stdout to verify logging happens
+// TestGoPanicWithoutHandler verifies panic is caught even without handler
+func TestGoPanicWithoutHandler(t *testing.T) {
+	// Capture stdout to verify default logging happens
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	Go(func() {
-		panic("test panic with nil handler")
-	}, nil)
+	done := make(chan bool, 1)
+	go func() {
+		Go(func() {
+			panic("test panic without handler")
+		})
+		time.Sleep(100 * time.Millisecond)
+		done <- true
+	}()
 
-	// Give goroutine time to execute and panic
-	time.Sleep(100 * time.Millisecond)
+	<-done
 
 	w.Close()
 	os.Stdout = oldStdout
@@ -88,14 +93,88 @@ func TestGoPanicWithNilHandler(t *testing.T) {
 	io.Copy(&buf, r)
 	output := buf.String()
 
-	if !strings.Contains(output, "Panic caught in goroutine") {
-		t.Error("Expected panic message in output")
+	if !strings.Contains(output, "--- PANIC RECOVERED ---") {
+		t.Error("Output should contain default panic header")
 	}
-	if !strings.Contains(output, "test panic with nil handler") {
-		t.Error("Expected panic value in output")
+	if !strings.Contains(output, "test panic without handler") {
+		t.Error("Output should contain panic value")
+	}
+}
+
+// TestGoPanicWithZapLogger verifies zap logger is used when provided
+func TestGoPanicWithZapLogger(t *testing.T) {
+	// Create a buffer to capture zap logs
+	var buf bytes.Buffer
+	writer := zapcore.AddSync(&buf)
+
+	encoder := zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+		MessageKey:  "msg",
+		LevelKey:    "level",
+		EncodeLevel: zapcore.LowercaseLevelEncoder,
+	})
+
+	core := zapcore.NewCore(encoder, writer, zapcore.DebugLevel)
+	logger := zap.New(core)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("zap panic test")
+	}, WithLogger(logger), WithHandler(func(err any, stack []byte) {
+		defer wg.Done()
+	}))
+
+	wg.Wait()
+
+	output := buf.String()
+
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Zap log should contain panic message")
+	}
+	if !strings.Contains(output, "zap panic test") {
+		t.Error("Zap log should contain panic value")
+	}
+	if !strings.Contains(output, "error") {
+		t.Error("Zap log should contain error field")
+	}
+}
+
+// TestGoWithZapLoggerAndHandler verifies both logger and handler work together
+func TestGoWithZapLoggerAndHandler(t *testing.T) {
+	var buf bytes.Buffer
+	writer := zapcore.AddSync(&buf)
+
+	encoder := zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+		MessageKey:  "msg",
+		LevelKey:    "level",
+		EncodeLevel: zapcore.LowercaseLevelEncoder,
+	})
+
+	core := zapcore.NewCore(encoder, writer, zapcore.DebugLevel)
+	logger := zap.New(core)
+
+	var handlerCalled bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("combined test")
+	}, WithLogger(logger), WithHandler(func(err any, stack []byte) {
+		defer wg.Done()
+		handlerCalled = true
+	}))
+
+	wg.Wait()
+
+	if !handlerCalled {
+		t.Error("Handler should have been called")
 	}
 
-	close(done)
+	output := buf.String()
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Zap logger should have logged the panic")
+	}
 }
 
 // TestGoDifferentPanicTypes verifies different panic value types are handled
@@ -121,10 +200,10 @@ func TestGoDifferentPanicTypes(t *testing.T) {
 
 			Go(func() {
 				panic(tc.panicVal)
-			}, func(err any, stack []byte) {
+			}, WithHandler(func(err any, stack []byte) {
 				defer wg.Done()
 				capturedErr = err
-			})
+			}))
 
 			wg.Wait()
 
@@ -143,10 +222,10 @@ func TestGoStackTraceContent(t *testing.T) {
 
 	Go(func() {
 		panicInNestedFunction()
-	}, func(err any, stack []byte) {
+	}, WithHandler(func(err any, stack []byte) {
 		defer wg.Done()
 		capturedStack = stack
-	})
+	}))
 
 	wg.Wait()
 
@@ -178,23 +257,24 @@ func TestGoMultipleConcurrentGoroutines(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		shouldPanic := i%2 == 0
+		index := i // Capture loop variable
 
 		if shouldPanic {
 			Go(func() {
-				panic(fmt.Sprintf("panic %d", i))
-			}, func(err any, stack []byte) {
+				panic(fmt.Sprintf("panic %d", index))
+			}, WithHandler(func(err any, stack []byte) {
 				mu.Lock()
 				panicCount++
 				mu.Unlock()
 				wg.Done()
-			})
+			}))
 		} else {
 			Go(func() {
 				defer wg.Done()
 				mu.Lock()
 				successCount++
 				mu.Unlock()
-			}, nil)
+			})
 		}
 	}
 
@@ -211,36 +291,35 @@ func TestGoMultipleConcurrentGoroutines(t *testing.T) {
 	}
 }
 
-
 // TestGoRunsInSeparateGoroutine verifies function runs asynchronously
 func TestGoRunsInSeparateGoroutine(t *testing.T) {
-	mainThreadID := getGoroutineID()
-	var functionThreadID uint64
+	executed := false
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	Go(func() {
 		defer wg.Done()
-		functionThreadID = getGoroutineID()
-	}, nil)
+		time.Sleep(50 * time.Millisecond)
+		executed = true
+	})
 
+	// Check that we don't block immediately
 	select {
 	case <-time.After(10 * time.Millisecond):
+		// Good - we didn't block
+		if executed {
+			t.Error("Function should not have completed yet")
+		}
 	}
 
 	wg.Wait()
 
-	if functionThreadID == mainThreadID {
-		t.Error("Function should run in a different goroutine")
+	if !executed {
+		t.Error("Function should have completed after wait")
 	}
 }
 
-// Helper to get goroutine ID (simplified - just checks if different)
-func getGoroutineID() uint64 {
-	return uint64(time.Now().UnixNano())
-}
-
-// TestGoDefaultLogging verifies panic message is printed
+// TestGoDefaultLogging verifies default fmt panic message is printed
 func TestGoDefaultLogging(t *testing.T) {
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -251,11 +330,14 @@ func TestGoDefaultLogging(t *testing.T) {
 
 	Go(func() {
 		panic("logged panic")
-	}, func(err any, stack []byte) {
-		wg.Done()
-	})
+	}, WithHandler(func(err any, stack []byte) {
+		defer wg.Done()
+	}))
 
 	wg.Wait()
+
+	// Give a small delay to ensure output is written
+	time.Sleep(10 * time.Millisecond)
 
 	w.Close()
 	os.Stdout = oldStdout
@@ -264,11 +346,32 @@ func TestGoDefaultLogging(t *testing.T) {
 	io.Copy(&buf, r)
 	output := buf.String()
 
-	if !strings.Contains(output, "Panic caught in goroutine") {
-		t.Error("Output should contain panic message header")
+	if !strings.Contains(output, "--- PANIC RECOVERED ---") {
+		t.Error("Output should contain default panic header")
 	}
 	if !strings.Contains(output, "logged panic") {
 		t.Error("Output should contain panic value")
+	}
+	if !strings.Contains(output, "Stack Trace:") {
+		t.Error("Output should contain stack trace header")
+	}
+}
+
+// TestGoWithNilFunction verifies behavior when nil function is passed
+func TestGoWithNilFunction(t *testing.T) {
+	var capturedErr any
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(nil, WithHandler(func(err any, stack []byte) {
+		defer wg.Done()
+		capturedErr = err
+	}))
+
+	wg.Wait()
+
+	if capturedErr == nil {
+		t.Error("Should have captured a panic from nil function call")
 	}
 }
 
@@ -283,12 +386,12 @@ func TestGoRapidSuccessiveCalls(t *testing.T) {
 		wg.Add(1)
 		Go(func() {
 			panic("rapid panic")
-		}, func(err any, stack []byte) {
+		}, WithHandler(func(err any, stack []byte) {
 			mu.Lock()
 			handlerCount++
 			mu.Unlock()
 			wg.Done()
-		})
+		}))
 	}
 
 	wg.Wait()
@@ -315,12 +418,12 @@ func TestGoResourceCleanup(t *testing.T) {
 		executionOrder = append(executionOrder, "function body")
 		mu.Unlock()
 		panic("test panic")
-	}, func(err any, stack []byte) {
+	}, WithHandler(func(err any, stack []byte) {
 		defer wg.Done()
 		mu.Lock()
 		executionOrder = append(executionOrder, "recovery handler")
 		mu.Unlock()
-	})
+	}))
 
 	wg.Wait()
 
@@ -347,10 +450,10 @@ func TestGoPanicAfterDelay(t *testing.T) {
 		executed = true
 		time.Sleep(50 * time.Millisecond)
 		panic("delayed panic")
-	}, func(err any, stack []byte) {
+	}, WithHandler(func(err any, stack []byte) {
 		defer wg.Done()
 		capturedErr = err
-	})
+	}))
 
 	wg.Wait()
 
@@ -370,9 +473,9 @@ func TestGoEmptyFunction(t *testing.T) {
 	Go(func() {
 		// Empty function
 		done <- true
-	}, func(err any, stack []byte) {
+	}, WithHandler(func(err any, stack []byte) {
 		handlerCalled = true
-	})
+	}))
 
 	select {
 	case <-done:
@@ -383,5 +486,150 @@ func TestGoEmptyFunction(t *testing.T) {
 
 	if handlerCalled {
 		t.Error("Handler should not be called for empty function")
+	}
+}
+
+// TestGoMultipleOptions verifies multiple options can be combined
+func TestGoMultipleOptions(t *testing.T) {
+	var buf bytes.Buffer
+	writer := zapcore.AddSync(&buf)
+
+	encoder := zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+		MessageKey:  "msg",
+		LevelKey:    "level",
+		EncodeLevel: zapcore.LowercaseLevelEncoder,
+	})
+
+	core := zapcore.NewCore(encoder, writer, zapcore.DebugLevel)
+	logger := zap.New(core)
+
+	var handlerCalled bool
+	var capturedErr any
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("multi-option test")
+	}, WithLogger(logger), WithHandler(func(err any, stack []byte) {
+		defer wg.Done()
+		handlerCalled = true
+		capturedErr = err
+	}))
+
+	wg.Wait()
+
+	if !handlerCalled {
+		t.Error("Handler should have been called")
+	}
+	if capturedErr != "multi-option test" {
+		t.Errorf("Expected 'multi-option test', got %v", capturedErr)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Zap logger should have logged the panic")
+	}
+}
+
+// TestGoNoOptions verifies function works with no options
+func TestGoNoOptions(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	done := make(chan bool, 1)
+	go func() {
+		Go(func() {
+			panic("no options panic")
+		})
+		time.Sleep(100 * time.Millisecond)
+		done <- true
+	}()
+
+	<-done
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	// Should use default fmt logging
+	if !strings.Contains(output, "--- PANIC RECOVERED ---") {
+		t.Error("Should use default logging when no options provided")
+	}
+	if !strings.Contains(output, "no options panic") {
+		t.Error("Output should contain panic value")
+	}
+}
+
+// TestGoZapLoggerWithoutHandler verifies zap logger works without handler
+func TestGoZapLoggerWithoutHandler(t *testing.T) {
+	var buf bytes.Buffer
+	writer := zapcore.AddSync(&buf)
+
+	encoder := zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+		MessageKey:  "msg",
+		LevelKey:    "level",
+		EncodeLevel: zapcore.LowercaseLevelEncoder,
+	})
+
+	core := zapcore.NewCore(encoder, writer, zapcore.DebugLevel)
+	logger := zap.New(core)
+
+	done := make(chan bool, 1)
+	go func() {
+		Go(func() {
+			panic("zap only test")
+		}, WithLogger(logger))
+		time.Sleep(100 * time.Millisecond)
+		done <- true
+	}()
+
+	<-done
+
+	output := buf.String()
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Zap logger should have logged the panic")
+	}
+	if !strings.Contains(output, "zap only test") {
+		t.Error("Zap log should contain panic value")
+	}
+}
+
+// TestGoHandlerOnlyOption verifies handler works without logger
+func TestGoHandlerOnlyOption(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	var handlerCalled bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("handler only test")
+	}, WithHandler(func(err any, stack []byte) {
+		defer wg.Done()
+		handlerCalled = true
+	}))
+
+	wg.Wait()
+	time.Sleep(10 * time.Millisecond)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	if !handlerCalled {
+		t.Error("Handler should have been called")
+	}
+	// Should still use default fmt logging
+	if !strings.Contains(output, "--- PANIC RECOVERED ---") {
+		t.Error("Should use default logging when only handler provided")
 	}
 }
