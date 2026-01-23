@@ -13,7 +13,7 @@ func main() {
 	defer logger.Sync()
 
 	// 2. Define an optional custom handler (e.g., for metrics or Sentry)
-	onPanic := func(err any, stack []byte) {
+	onPanic := func(metadata map[string]any) {
 		logger.Info("Custom handler executed: Sending alert to monitoring system...")
 	}
 
@@ -22,13 +22,13 @@ func main() {
 	// 3. Use the library with Functional Options
 	gorecovery.Go(func() {
 		logger.Info("Executing risky logic...")
-		
+
 		// Trigger a panic
 		var slice []string
 		_ = slice[0] // This will cause an index out of range panic
-	}, 
-	gorecovery.WithLogger(logger), 
-	gorecovery.WithHandler(onPanic),
+	},
+		gorecovery.WithLogger(logger),
+		gorecovery.WithHandler(onPanic),
 	)
 
 	time.Sleep(100 * time.Millisecond)

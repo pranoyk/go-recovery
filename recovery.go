@@ -8,14 +8,22 @@ import (
 )
 
 // PanicHandler is a function signature for custom logic after a panic.
-type PanicHandler func(err any, stack []byte)
+type PanicHandler func(metadata map[string]any)
 
 type options struct {
-	logger  *zap.Logger
-	handler PanicHandler
+	logger   *zap.Logger
+	handler  PanicHandler
+	metadata map[string]any
 }
 
 type Option func(*options)
+
+// WithMetadata allows the handler function to use metadata to perform operation
+func WithMetadata(data map[string]any) Option {
+	return func(o *options) {
+		o.metadata = data
+	}
+}
 
 // WithLogger overrides the default fmt logger with a Zap instance.
 func WithLogger(l *zap.Logger) Option {
@@ -24,6 +32,7 @@ func WithLogger(l *zap.Logger) Option {
 	}
 }
 
+// WithHandler allows custome handling on panic
 func WithHandler(h PanicHandler) Option {
 	return func(o *options) {
 		o.handler = h
@@ -54,7 +63,7 @@ func Go(fn func(), opts ...Option) {
 
 				// CUSTOM HANDLER LOGIC
 				if config.handler != nil {
-					config.handler(r, stack)
+					config.handler(config.metadata)
 				}
 			}
 		}()

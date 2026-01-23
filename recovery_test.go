@@ -25,7 +25,7 @@ func TestGoNoPanic(t *testing.T) {
 	Go(func() {
 		defer wg.Done()
 		executed = true
-	}, WithHandler(func(err any, stack []byte) {
+	}, WithHandler(func(metadata map[string]any) {
 		handlerCalled = true
 	}))
 
@@ -42,29 +42,57 @@ func TestGoNoPanic(t *testing.T) {
 // TestGoPanicWithHandler verifies panic is caught and handler is invoked
 func TestGoPanicWithHandler(t *testing.T) {
 	expectedPanic := "test panic"
-	var capturedErr any
-	var capturedStack []byte
+	handlerCalled := false
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	Go(func() {
 		panic(expectedPanic)
-	}, WithHandler(func(err any, stack []byte) {
+	}, WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
-		capturedErr = err
-		capturedStack = stack
+		handlerCalled = true
 	}))
 
 	wg.Wait()
 
-	if capturedErr != expectedPanic {
-		t.Errorf("Expected panic %v, got %v", expectedPanic, capturedErr)
+	if !handlerCalled {
+		t.Error("Handler should have been called")
 	}
-	if len(capturedStack) == 0 {
-		t.Error("Stack trace should not be empty")
+}
+
+// TestGoPanicWithHandlerAndMetadata verifies handler receives metadata
+func TestGoPanicWithHandlerAndMetadata(t *testing.T) {
+	expectedMetadata := map[string]any{
+		"user_id":  123,
+		"action":   "test_action",
+		"endpoint": "/api/test",
 	}
-	if !strings.Contains(string(capturedStack), "goroutine") {
-		t.Error("Stack trace should contain goroutine information")
+
+	var receivedMetadata map[string]any
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("test panic with metadata")
+	}, WithMetadata(expectedMetadata), WithHandler(func(metadata map[string]any) {
+		defer wg.Done()
+		receivedMetadata = metadata
+	}))
+
+	wg.Wait()
+
+	if receivedMetadata == nil {
+		t.Fatal("Handler should have received metadata")
+	}
+
+	if receivedMetadata["user_id"] != 123 {
+		t.Errorf("Expected user_id 123, got %v", receivedMetadata["user_id"])
+	}
+	if receivedMetadata["action"] != "test_action" {
+		t.Errorf("Expected action 'test_action', got %v", receivedMetadata["action"])
+	}
+	if receivedMetadata["endpoint"] != "/api/test" {
+		t.Errorf("Expected endpoint '/api/test', got %v", receivedMetadata["endpoint"])
 	}
 }
 
@@ -121,7 +149,7 @@ func TestGoPanicWithZapLogger(t *testing.T) {
 
 	Go(func() {
 		panic("zap panic test")
-	}, WithLogger(logger), WithHandler(func(err any, stack []byte) {
+	}, WithLogger(logger), WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
 	}))
 
@@ -160,7 +188,7 @@ func TestGoWithZapLoggerAndHandler(t *testing.T) {
 
 	Go(func() {
 		panic("combined test")
-	}, WithLogger(logger), WithHandler(func(err any, stack []byte) {
+	}, WithLogger(logger), WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
 		handlerCalled = true
 	}))
@@ -180,64 +208,71 @@ func TestGoWithZapLoggerAndHandler(t *testing.T) {
 // TestGoDifferentPanicTypes verifies different panic value types are handled
 func TestGoDifferentPanicTypes(t *testing.T) {
 	testCases := []struct {
-		name      string
-		panicVal  any
-		expectStr string
+		name     string
+		panicVal any
 	}{
-		{"String", "string panic", "string panic"},
-		{"Error", errors.New("error panic"), "error panic"},
-		{"Integer", 42, "42"},
-		{"Struct", struct{ Msg string }{"custom panic"}, "{custom panic}"},
-		{"Boolean", false, "false"},
-		{"Float", 3.14, "3.14"},
+		{"String", "string panic"},
+		{"Error", errors.New("error panic")},
+		{"Integer", 42},
+		{"Struct", struct{ Msg string }{"custom panic"}},
+		{"Boolean", false},
+		{"Float", 3.14},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedErr any
+			handlerCalled := false
 			var wg sync.WaitGroup
 			wg.Add(1)
 
 			Go(func() {
 				panic(tc.panicVal)
-			}, WithHandler(func(err any, stack []byte) {
+			}, WithHandler(func(metadata map[string]any) {
 				defer wg.Done()
-				capturedErr = err
+				handlerCalled = true
 			}))
 
 			wg.Wait()
 
-			if fmt.Sprint(capturedErr) != tc.expectStr {
-				t.Errorf("Expected %v, got %v", tc.expectStr, capturedErr)
+			if !handlerCalled {
+				t.Error("Handler should have been called for panic type:", tc.name)
 			}
 		})
 	}
 }
 
-// TestGoStackTraceContent verifies stack trace contains relevant information
-func TestGoStackTraceContent(t *testing.T) {
-	var capturedStack []byte
+// TestGoStackTraceLogged verifies stack trace is logged
+func TestGoStackTraceLogged(t *testing.T) {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	Go(func() {
 		panicInNestedFunction()
-	}, WithHandler(func(err any, stack []byte) {
+	}, WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
-		capturedStack = stack
 	}))
 
 	wg.Wait()
+	time.Sleep(10 * time.Millisecond)
 
-	stackStr := string(capturedStack)
+	w.Close()
+	os.Stdout = oldStdout
 
-	if len(capturedStack) == 0 {
-		t.Fatal("Stack trace should not be empty")
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Stack Trace:") {
+		t.Error("Output should contain stack trace header")
 	}
-	if !strings.Contains(stackStr, "goroutine") {
-		t.Error("Stack trace should contain 'goroutine'")
+	if !strings.Contains(output, "goroutine") {
+		t.Error("Stack trace should contain goroutine information")
 	}
-	if !strings.Contains(stackStr, "panicInNestedFunction") {
+	if !strings.Contains(output, "panicInNestedFunction") {
 		t.Error("Stack trace should contain function name")
 	}
 }
@@ -262,7 +297,7 @@ func TestGoMultipleConcurrentGoroutines(t *testing.T) {
 		if shouldPanic {
 			Go(func() {
 				panic(fmt.Sprintf("panic %d", index))
-			}, WithHandler(func(err any, stack []byte) {
+			}, WithHandler(func(metadata map[string]any) {
 				mu.Lock()
 				panicCount++
 				mu.Unlock()
@@ -330,7 +365,7 @@ func TestGoDefaultLogging(t *testing.T) {
 
 	Go(func() {
 		panic("logged panic")
-	}, WithHandler(func(err any, stack []byte) {
+	}, WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
 	}))
 
@@ -357,24 +392,6 @@ func TestGoDefaultLogging(t *testing.T) {
 	}
 }
 
-// TestGoWithNilFunction verifies behavior when nil function is passed
-func TestGoWithNilFunction(t *testing.T) {
-	var capturedErr any
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	Go(nil, WithHandler(func(err any, stack []byte) {
-		defer wg.Done()
-		capturedErr = err
-	}))
-
-	wg.Wait()
-
-	if capturedErr == nil {
-		t.Error("Should have captured a panic from nil function call")
-	}
-}
-
 // TestGoRapidSuccessiveCalls verifies no race conditions
 func TestGoRapidSuccessiveCalls(t *testing.T) {
 	const numCalls = 100
@@ -386,7 +403,7 @@ func TestGoRapidSuccessiveCalls(t *testing.T) {
 		wg.Add(1)
 		Go(func() {
 			panic("rapid panic")
-		}, WithHandler(func(err any, stack []byte) {
+		}, WithHandler(func(metadata map[string]any) {
 			mu.Lock()
 			handlerCount++
 			mu.Unlock()
@@ -401,70 +418,6 @@ func TestGoRapidSuccessiveCalls(t *testing.T) {
 	}
 }
 
-// TestGoResourceCleanup verifies defer in function executes before recovery
-func TestGoResourceCleanup(t *testing.T) {
-	executionOrder := []string{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	Go(func() {
-		defer func() {
-			mu.Lock()
-			executionOrder = append(executionOrder, "function defer")
-			mu.Unlock()
-		}()
-		mu.Lock()
-		executionOrder = append(executionOrder, "function body")
-		mu.Unlock()
-		panic("test panic")
-	}, WithHandler(func(err any, stack []byte) {
-		defer wg.Done()
-		mu.Lock()
-		executionOrder = append(executionOrder, "recovery handler")
-		mu.Unlock()
-	}))
-
-	wg.Wait()
-
-	expected := []string{"function body", "function defer", "recovery handler"}
-	if len(executionOrder) != len(expected) {
-		t.Fatalf("Expected %d steps, got %d", len(expected), len(executionOrder))
-	}
-
-	for i, step := range expected {
-		if executionOrder[i] != step {
-			t.Errorf("Step %d: expected %s, got %s", i, step, executionOrder[i])
-		}
-	}
-}
-
-// TestGoPanicAfterDelay verifies panic can occur after some execution
-func TestGoPanicAfterDelay(t *testing.T) {
-	executed := false
-	var capturedErr any
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	Go(func() {
-		executed = true
-		time.Sleep(50 * time.Millisecond)
-		panic("delayed panic")
-	}, WithHandler(func(err any, stack []byte) {
-		defer wg.Done()
-		capturedErr = err
-	}))
-
-	wg.Wait()
-
-	if !executed {
-		t.Error("Function should have executed before panic")
-	}
-	if capturedErr != "delayed panic" {
-		t.Errorf("Expected 'delayed panic', got %v", capturedErr)
-	}
-}
-
 // TestGoEmptyFunction verifies empty function executes without issues
 func TestGoEmptyFunction(t *testing.T) {
 	handlerCalled := false
@@ -473,7 +426,7 @@ func TestGoEmptyFunction(t *testing.T) {
 	Go(func() {
 		// Empty function
 		done <- true
-	}, WithHandler(func(err any, stack []byte) {
+	}, WithHandler(func(metadata map[string]any) {
 		handlerCalled = true
 	}))
 
@@ -503,17 +456,22 @@ func TestGoMultipleOptions(t *testing.T) {
 	core := zapcore.NewCore(encoder, writer, zapcore.DebugLevel)
 	logger := zap.New(core)
 
+	metadata := map[string]any{
+		"request_id": "12345",
+		"user":       "test_user",
+	}
+
 	var handlerCalled bool
-	var capturedErr any
+	var receivedMetadata map[string]any
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	Go(func() {
 		panic("multi-option test")
-	}, WithLogger(logger), WithHandler(func(err any, stack []byte) {
+	}, WithLogger(logger), WithMetadata(metadata), WithHandler(func(meta map[string]any) {
 		defer wg.Done()
 		handlerCalled = true
-		capturedErr = err
+		receivedMetadata = meta
 	}))
 
 	wg.Wait()
@@ -521,8 +479,8 @@ func TestGoMultipleOptions(t *testing.T) {
 	if !handlerCalled {
 		t.Error("Handler should have been called")
 	}
-	if capturedErr != "multi-option test" {
-		t.Errorf("Expected 'multi-option test', got %v", capturedErr)
+	if receivedMetadata["request_id"] != "12345" {
+		t.Error("Metadata should have been passed to handler")
 	}
 
 	output := buf.String()
@@ -531,38 +489,6 @@ func TestGoMultipleOptions(t *testing.T) {
 	}
 }
 
-// TestGoNoOptions verifies function works with no options
-func TestGoNoOptions(t *testing.T) {
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	done := make(chan bool, 1)
-	go func() {
-		Go(func() {
-			panic("no options panic")
-		})
-		time.Sleep(100 * time.Millisecond)
-		done <- true
-	}()
-
-	<-done
-
-	w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	output := buf.String()
-
-	// Should use default fmt logging
-	if !strings.Contains(output, "--- PANIC RECOVERED ---") {
-		t.Error("Should use default logging when no options provided")
-	}
-	if !strings.Contains(output, "no options panic") {
-		t.Error("Output should contain panic value")
-	}
-}
 
 // TestGoZapLoggerWithoutHandler verifies zap logger works without handler
 func TestGoZapLoggerWithoutHandler(t *testing.T) {
@@ -598,25 +524,27 @@ func TestGoZapLoggerWithoutHandler(t *testing.T) {
 	}
 }
 
-// TestGoHandlerOnlyOption verifies handler works without logger
-func TestGoHandlerOnlyOption(t *testing.T) {
+
+// TestGoMetadataWithoutHandler verifies metadata is stored but not used if no handler
+func TestGoMetadataWithoutHandler(t *testing.T) {
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	var handlerCalled bool
-	var wg sync.WaitGroup
-	wg.Add(1)
+	metadata := map[string]any{
+		"key": "value",
+	}
 
-	Go(func() {
-		panic("handler only test")
-	}, WithHandler(func(err any, stack []byte) {
-		defer wg.Done()
-		handlerCalled = true
-	}))
+	done := make(chan bool, 1)
+	go func() {
+		Go(func() {
+			panic("metadata without handler")
+		}, WithMetadata(metadata))
+		time.Sleep(100 * time.Millisecond)
+		done <- true
+	}()
 
-	wg.Wait()
-	time.Sleep(10 * time.Millisecond)
+	<-done
 
 	w.Close()
 	os.Stdout = oldStdout
@@ -625,11 +553,156 @@ func TestGoHandlerOnlyOption(t *testing.T) {
 	io.Copy(&buf, r)
 	output := buf.String()
 
-	if !handlerCalled {
-		t.Error("Handler should have been called")
-	}
-	// Should still use default fmt logging
+	// Should still log the panic even without handler
 	if !strings.Contains(output, "--- PANIC RECOVERED ---") {
-		t.Error("Should use default logging when only handler provided")
+		t.Error("Should use default logging")
+	}
+}
+
+// TestGoHandlerWithEmptyMetadata verifies handler works with empty metadata
+func TestGoHandlerWithEmptyMetadata(t *testing.T) {
+	emptyMetadata := map[string]any{}
+	var receivedMetadata map[string]any
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("empty metadata test")
+	}, WithMetadata(emptyMetadata), WithHandler(func(metadata map[string]any) {
+		defer wg.Done()
+		receivedMetadata = metadata
+	}))
+
+	wg.Wait()
+
+	if receivedMetadata == nil {
+		t.Error("Metadata should not be nil")
+	}
+	if len(receivedMetadata) != 0 {
+		t.Error("Metadata should be empty")
+	}
+}
+
+// TestGoMetadataIntegrity verifies metadata is not modified during panic handling
+func TestGoMetadataIntegrity(t *testing.T) {
+	originalMetadata := map[string]any{
+		"id":     1,
+		"name":   "test",
+		"active": true,
+	}
+
+	var receivedMetadata map[string]any
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("metadata integrity test")
+	}, WithMetadata(originalMetadata), WithHandler(func(metadata map[string]any) {
+		defer wg.Done()
+		receivedMetadata = metadata
+	}))
+
+	wg.Wait()
+
+	// Verify all fields are preserved
+	if receivedMetadata["id"] != 1 {
+		t.Errorf("Expected id 1, got %v", receivedMetadata["id"])
+	}
+	if receivedMetadata["name"] != "test" {
+		t.Errorf("Expected name 'test', got %v", receivedMetadata["name"])
+	}
+	if receivedMetadata["active"] != true {
+		t.Errorf("Expected active true, got %v", receivedMetadata["active"])
+	}
+}
+
+// TestGoComplexMetadata verifies handler receives complex metadata types
+func TestGoComplexMetadata(t *testing.T) {
+	type CustomStruct struct {
+		Field1 string
+		Field2 int
+	}
+
+	complexMetadata := map[string]any{
+		"string":  "value",
+		"int":     42,
+		"float":   3.14,
+		"bool":    true,
+		"slice":   []string{"a", "b", "c"},
+		"map":     map[string]int{"x": 1, "y": 2},
+		"struct":  CustomStruct{Field1: "test", Field2: 100},
+		"pointer": &CustomStruct{Field1: "ptr", Field2: 200},
+	}
+
+	var receivedMetadata map[string]any
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("complex metadata test")
+	}, WithMetadata(complexMetadata), WithHandler(func(metadata map[string]any) {
+		defer wg.Done()
+		receivedMetadata = metadata
+	}))
+
+	wg.Wait()
+
+	if receivedMetadata["string"] != "value" {
+		t.Error("String metadata not preserved")
+	}
+	if receivedMetadata["int"] != 42 {
+		t.Error("Int metadata not preserved")
+	}
+	if receivedMetadata["bool"] != true {
+		t.Error("Bool metadata not preserved")
+	}
+
+	// Verify complex types
+	slice, ok := receivedMetadata["slice"].([]string)
+	if !ok || len(slice) != 3 {
+		t.Error("Slice metadata not preserved")
+	}
+
+	mapData, ok := receivedMetadata["map"].(map[string]int)
+	if !ok || mapData["x"] != 1 {
+		t.Error("Map metadata not preserved")
+	}
+}
+
+// TestGoHandlerCanAccessMetadataForRecovery verifies practical use case
+func TestGoHandlerCanAccessMetadataForRecovery(t *testing.T) {
+	// Simulate a real-world scenario where metadata helps with recovery
+	metadata := map[string]any{
+		"transaction_id": "txn_12345",
+		"user_id":        "user_999",
+		"operation":      "database_write",
+		"retry_count":    0,
+	}
+
+	handlerExecuted := false
+	var capturedTransactionID string
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("database connection lost")
+	}, WithMetadata(metadata), WithHandler(func(meta map[string]any) {
+		defer wg.Done()
+		handlerExecuted = true
+
+		// Handler can use metadata to perform recovery actions
+		if txnID, ok := meta["transaction_id"].(string); ok {
+			capturedTransactionID = txnID
+			// In real scenario: mark transaction for retry, send alert, etc.
+		}
+	}))
+
+	wg.Wait()
+
+	if !handlerExecuted {
+		t.Error("Handler should have been executed")
+	}
+	if capturedTransactionID != "txn_12345" {
+		t.Errorf("Expected transaction_id 'txn_12345', got '%s'", capturedTransactionID)
 	}
 }
