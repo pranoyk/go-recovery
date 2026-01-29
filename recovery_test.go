@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -149,7 +150,7 @@ func TestGoPanicWithZapLogger(t *testing.T) {
 
 	Go(func() {
 		panic("zap panic test")
-	}, WithLogger(logger), WithHandler(func(metadata map[string]any) {
+	}, WithZap(logger), WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
 	}))
 
@@ -188,7 +189,7 @@ func TestGoWithZapLoggerAndHandler(t *testing.T) {
 
 	Go(func() {
 		panic("combined test")
-	}, WithLogger(logger), WithHandler(func(metadata map[string]any) {
+	}, WithZap(logger), WithHandler(func(metadata map[string]any) {
 		defer wg.Done()
 		handlerCalled = true
 	}))
@@ -468,7 +469,7 @@ func TestGoMultipleOptions(t *testing.T) {
 
 	Go(func() {
 		panic("multi-option test")
-	}, WithLogger(logger), WithMetadata(metadata), WithHandler(func(meta map[string]any) {
+	}, WithZap(logger), WithMetadata(metadata), WithHandler(func(meta map[string]any) {
 		defer wg.Done()
 		handlerCalled = true
 		receivedMetadata = meta
@@ -489,7 +490,6 @@ func TestGoMultipleOptions(t *testing.T) {
 	}
 }
 
-
 // TestGoZapLoggerWithoutHandler verifies zap logger works without handler
 func TestGoZapLoggerWithoutHandler(t *testing.T) {
 	var buf bytes.Buffer
@@ -508,7 +508,7 @@ func TestGoZapLoggerWithoutHandler(t *testing.T) {
 	go func() {
 		Go(func() {
 			panic("zap only test")
-		}, WithLogger(logger))
+		}, WithZap(logger))
 		time.Sleep(100 * time.Millisecond)
 		done <- true
 	}()
@@ -523,7 +523,6 @@ func TestGoZapLoggerWithoutHandler(t *testing.T) {
 		t.Error("Zap log should contain panic value")
 	}
 }
-
 
 // TestGoMetadataWithoutHandler verifies metadata is stored but not used if no handler
 func TestGoMetadataWithoutHandler(t *testing.T) {
@@ -704,5 +703,144 @@ func TestGoHandlerCanAccessMetadataForRecovery(t *testing.T) {
 	}
 	if capturedTransactionID != "txn_12345" {
 		t.Errorf("Expected transaction_id 'txn_12345', got '%s'", capturedTransactionID)
+	}
+}
+
+func TestGoPanicWithSlogLogger(t *testing.T) {
+	// Create a buffer to capture slog logs
+	var buf bytes.Buffer
+
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	logger := slog.New(handler)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("slog panic test")
+	}, WithSlog(logger), WithHandler(func(metadata map[string]any) {
+		defer wg.Done()
+	}))
+
+	wg.Wait()
+
+	output := buf.String()
+
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Slog should contain panic message")
+	}
+	if !strings.Contains(output, "slog panic test") {
+		t.Error("Slog should contain panic value")
+	}
+	if !strings.Contains(output, "panic_error") {
+		t.Error("Slog should contain panic_error field")
+	}
+	if !strings.Contains(output, "stacktrace") {
+		t.Error("Slog should contain stacktrace field")
+	}
+}
+
+// TestGoWithSlogLoggerAndHandler verifies both slog logger and handler work together
+func TestGoWithSlogLoggerAndHandler(t *testing.T) {
+	var buf bytes.Buffer
+
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	logger := slog.New(handler)
+
+	var handlerCalled bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("slog combined test")
+	}, WithSlog(logger), WithHandler(func(metadata map[string]any) {
+		defer wg.Done()
+		handlerCalled = true
+	}))
+
+	wg.Wait()
+
+	if !handlerCalled {
+		t.Error("Handler should have been called")
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Slog logger should have logged the panic")
+	}
+}
+
+// TestGoSlogWithMetadata verifies slog logs metadata fields
+func TestGoSlogWithMetadata(t *testing.T) {
+	var buf bytes.Buffer
+
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	logger := slog.New(handler)
+
+	metadata := map[string]any{
+		"request_id": "req_123",
+		"user_id":    "user_456",
+		"endpoint":   "/api/test",
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	Go(func() {
+		panic("slog metadata test")
+	}, WithSlog(logger), WithMetadata(metadata), WithHandler(func(meta map[string]any) {
+		defer wg.Done()
+	}))
+
+	wg.Wait()
+
+	output := buf.String()
+
+	if !strings.Contains(output, "request_id") {
+		t.Error("Slog should contain request_id metadata")
+	}
+	if !strings.Contains(output, "req_123") {
+		t.Error("Slog should contain request_id value")
+	}
+	if !strings.Contains(output, "user_id") {
+		t.Error("Slog should contain user_id metadata")
+	}
+	if !strings.Contains(output, "user_456") {
+		t.Error("Slog should contain user_id value")
+	}
+}
+
+// TestGoSlogLoggerWithoutHandler verifies slog logger works without handler
+func TestGoSlogLoggerWithoutHandler(t *testing.T) {
+	var buf bytes.Buffer
+
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	logger := slog.New(handler)
+
+	done := make(chan bool, 1)
+	go func() {
+		Go(func() {
+			panic("slog only test")
+		}, WithSlog(logger))
+		time.Sleep(100 * time.Millisecond)
+		done <- true
+	}()
+
+	<-done
+
+	output := buf.String()
+	if !strings.Contains(output, "goroutine panic recovered") {
+		t.Error("Slog logger should have logged the panic")
+	}
+	if !strings.Contains(output, "slog only test") {
+		t.Error("Slog log should contain panic value")
 	}
 }

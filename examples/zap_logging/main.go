@@ -27,7 +27,7 @@ func main() {
 		var slice []string
 		_ = slice[0] // This will cause an index out of range panic
 	},
-		gorecovery.WithLogger(logger),
+		gorecovery.WithZap(logger),
 		gorecovery.WithHandler(onPanic),
 	)
 

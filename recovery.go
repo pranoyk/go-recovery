@@ -2,6 +2,7 @@ package gorecovery
 
 import (
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 
 	"go.uber.org/zap"
@@ -11,9 +12,10 @@ import (
 type PanicHandler func(metadata map[string]any)
 
 type options struct {
-	logger   *zap.Logger
-	handler  PanicHandler
-	metadata map[string]any
+	zapLogger  *zap.Logger
+	slogLogger *slog.Logger
+	handler    PanicHandler
+	metadata   map[string]any
 }
 
 type Option func(*options)
@@ -25,11 +27,14 @@ func WithMetadata(data map[string]any) Option {
 	}
 }
 
-// WithLogger overrides the default fmt logger with a Zap instance.
-func WithLogger(l *zap.Logger) Option {
+func WithZap(l *zap.Logger) Option {
 	return func(o *options) {
-		o.logger = l
+		o.zapLogger = l
 	}
+}
+
+func WithSlog(l *slog.Logger) Option {
+	return func(o *options) { o.slogLogger = l }
 }
 
 // WithHandler allows custome handling on panic
@@ -50,14 +55,26 @@ func Go(fn func(), opts ...Option) {
 			if r := recover(); r != nil {
 				stack := debug.Stack()
 
-				if config.logger != nil {
-					// Use Zap if provided
-					config.logger.Error("goroutine panic recovered",
-						zap.Any("error", r),
+				switch{
+				case config.slogLogger != nil:
+					attrs := []any{
+						slog.Any("panic_error", r),
+						slog.String("stacktrace", string(stack)),
+					}
+					for k, v := range config.metadata {
+						attrs = append(attrs, slog.Any(k, v))
+					}
+					config.slogLogger.Error("goroutine panic recovered", attrs...)
+				case config.zapLogger != nil:
+					fields := []zap.Field{
+						zap.Any("panic_error", r),
 						zap.ByteString("stacktrace", stack),
-					)
-				} else {
-					// Fallback to default fmt logging
+					}
+					for k, v := range config.metadata {
+						fields = append(fields, zap.Any(k, v))
+					}
+					config.zapLogger.Error("goroutine panic recovered", fields...)
+				default:
 					fmt.Printf("--- PANIC RECOVERED ---\nError: %v\nStack Trace:\n%s\n-----------------------\n", r, stack)
 				}
 
