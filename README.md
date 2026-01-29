@@ -4,13 +4,13 @@ A simple, lightweight Go library for graceful panic recovery in goroutines with 
 
 ---
 
-`go-recovery` ensures that a panic in a background goroutine doesn't crash your entire application. It automatically captures stack traces, provides structured logging via `zap` (with a `fmt` fallback), and allows you to execute custom cleanup logic with contextual metadata.
+`go-recovery` ensures that a panic in a background goroutine doesn't crash your entire application. It automatically captures stack traces, provides structured logging via `zap` or `slog` (with a `fmt` fallback), and allows you to execute custom cleanup logic with contextual metadata.
 
 Features
 
 -  ✅ **Safe Goroutines**: Prevents panic from propagating and killing the process.
 
-- ✅ **Structured Logging**: Deep integration with uber-go/zap.
+- ✅ **Structured Logging**: Deep integration with uber-go/zap and log/slog
 
 - ✅ **Stack Trace Capture**: Automatically captures and logs full stack traces
 
@@ -52,6 +52,25 @@ func main() {
 ---
 
 ## Advanced Usage
+
+**Using log/slog (Standard Library)**
+
+Ideal for modern Go applications using the standard structured logger.
+
+```go
+import (
+    "log/slog"
+    "github.com/pranoyk/go-recovery"
+)
+
+func main() {
+    logger := slog.Default()
+
+    panicwrap.Go(func() {
+        panic("slog panic")
+    }, panicwrap.WithSlog(logger))
+}
+```
 
 **Using Zap Logger & Metadata**
 
@@ -131,9 +150,13 @@ Runs the provided function in a new goroutine wrapped in a defer/recover block.
 
 | Option | Description |
 | ------ | ----------- |
-| `WithLogger(*zap.Logger)` | Replaces default fmt logging with structured zap logs. |
+| `WithSlog(*slog.Logger)` | Uses log/slog for structured error reporting. |
+| `WithZap(*zap.Logger)` | Replaces default fmt logging with structured zap logs. |
 | `WithMetadata(map[string]any)` | Attaches context to the panic. Metadata is included in logs and passed to the handler. |
 | `WithHandler(PanicHandler)` | Defines a callback function to run after a panic is caught and logged. |
+
+
+**Note on Logging:** The library is designed to be simple. If you provide both WithSlog and WithZap, the last one called will be used as the exclusive logger.
 
 ---
 
