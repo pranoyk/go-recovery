@@ -1,5 +1,9 @@
 # go-recovery
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/pranoyk/go-recovery)](https://goreportcard.com/report/github.com/pranoyk/go-recovery)
+[![Go Reference](https://pkg.go.dev/badge/github.com/pranoyk/go-recovery.svg)](https://pkg.go.dev/github.com/pranoyk/go-recovery)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A simple, lightweight Go library for graceful panic recovery in goroutines with structured logging and custom recovery handlers.
 
 ---
