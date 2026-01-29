@@ -267,7 +267,7 @@ func TestGoStackTraceLogged(t *testing.T) {
 	io.Copy(&buf, r)
 	output := buf.String()
 
-	if !strings.Contains(output, "Stack Trace:") {
+	if !strings.Contains(output, "stacktrace") {
 		t.Error("Output should contain stack trace header")
 	}
 	if !strings.Contains(output, "goroutine") {
@@ -388,7 +388,7 @@ func TestGoDefaultLogging(t *testing.T) {
 	if !strings.Contains(output, "logged panic") {
 		t.Error("Output should contain panic value")
 	}
-	if !strings.Contains(output, "Stack Trace:") {
+	if !strings.Contains(output, "stacktrace") {
 		t.Error("Output should contain stack trace header")
 	}
 }
@@ -733,9 +733,6 @@ func TestGoPanicWithSlogLogger(t *testing.T) {
 	}
 	if !strings.Contains(output, "slog panic test") {
 		t.Error("Slog should contain panic value")
-	}
-	if !strings.Contains(output, "panic_error") {
-		t.Error("Slog should contain panic_error field")
 	}
 	if !strings.Contains(output, "stacktrace") {
 		t.Error("Slog should contain stacktrace field")

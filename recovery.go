@@ -8,83 +8,82 @@ import (
 	"go.uber.org/zap"
 )
 
-// PanicHandler is a function signature for custom logic after a panic.
 type PanicHandler func(metadata map[string]any)
 
+type logFn func(err any, stack []byte, meta map[string]any)
+
 type options struct {
-	zapLogger  *zap.Logger
-	slogLogger *slog.Logger
-	handler    PanicHandler
-	metadata   map[string]any
+	log      logFn
+	handler  PanicHandler
+	metadata map[string]any
 }
 
 type Option func(*options)
 
-// WithMetadata allows the handler function to use metadata to perform operation
-func WithMetadata(data map[string]any) Option {
-	return func(o *options) {
-		o.metadata = data
-	}
-}
-
+// WithZap sets Zap as the exclusive logger
 func WithZap(l *zap.Logger) Option {
 	return func(o *options) {
-		o.zapLogger = l
+		o.log = func(err any, stack []byte, meta map[string]any) {
+			fields := []zap.Field{
+				zap.Any("error", err),
+				zap.ByteString("stacktrace", stack),
+			}
+			for k, v := range meta {
+				fields = append(fields, zap.Any(k, v))
+			}
+			l.Error("goroutine panic recovered", fields...)
+		}
 	}
 }
 
+// WithSlog sets Slog as the exclusive logger
 func WithSlog(l *slog.Logger) Option {
-	return func(o *options) { o.slogLogger = l }
-}
-
-// WithHandler allows custome handling on panic
-func WithHandler(h PanicHandler) Option {
 	return func(o *options) {
-		o.handler = h
+		o.log = func(err any, stack []byte, meta map[string]any) {
+			attrs := []any{
+				slog.Any("error", err),
+				slog.String("stacktrace", string(stack)),
+			}
+			for k, v := range meta {
+				attrs = append(attrs, slog.Any(k, v))
+			}
+			l.Error("goroutine panic recovered", attrs...)
+		}
 	}
 }
 
-// Go executes the provided function in a new goroutine and catches panics.
+func WithMetadata(data map[string]any) Option {
+	return func(o *options) { o.metadata = data }
+}
+
+func WithHandler(h PanicHandler) Option {
+	return func(o *options) { o.handler = h }
+}
+
 func Go(fn func(), opts ...Option) {
-	config := &options{}
+	config := &options{metadata: make(map[string]any)}
 	for _, opt := range opts {
 		opt(config)
 	}
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				stack := debug.Stack()
 
-				switch{
-				case config.slogLogger != nil:
-					attrs := []any{
-						slog.Any("panic_error", r),
-						slog.String("stacktrace", string(stack)),
-					}
-					for k, v := range config.metadata {
-						attrs = append(attrs, slog.Any(k, v))
-					}
-					config.slogLogger.Error("goroutine panic recovered", attrs...)
-				case config.zapLogger != nil:
-					fields := []zap.Field{
-						zap.Any("panic_error", r),
-						zap.ByteString("stacktrace", stack),
-					}
-					for k, v := range config.metadata {
-						fields = append(fields, zap.Any(k, v))
-					}
-					config.zapLogger.Error("goroutine panic recovered", fields...)
-				default:
-					fmt.Printf("--- PANIC RECOVERED ---\nError: %v\nStack Trace:\n%s\n-----------------------\n", r, stack)
+				// Log using the configured function or fallback to fmt
+				if config.log != nil {
+					config.log(r, stack, config.metadata)
+				} else {
+					fmt.Printf("--- PANIC RECOVERED ---\nError: %v\nMetadata: %v\nstacktrace:\n%s\n", r, config.metadata, stack)
 				}
 
-				// CUSTOM HANDLER LOGIC
+				// Run custom handler
 				if config.handler != nil {
 					config.handler(config.metadata)
 				}
 			}
 		}()
-
 		fn()
 	}()
 }
